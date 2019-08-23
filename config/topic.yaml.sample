@@ -1,0 +1,4 @@
+topics:
+  - .*test.*
+services:
+  - .*add_two.*

@@ -1,0 +1,11 @@
+{% for msg in messages -%}
+-
+  ros1_package_name: '{{package_name}}'
+  ros1_message_name: '{{msg}}'
+  ros2_package_name: '{{package_name}}'
+  ros2_message_name: '{{msg}}'
+  fields_1_to_2:
+    {% for f1,f2 in raw_data["messages"][msg]["fmap"].items() -%}
+    {{f1}}: '{{f2}}'
+    {% endfor %}
+{% endfor %}

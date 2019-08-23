@@ -1,0 +1,118 @@
+#! /usr/bin/env python2
+
+import argparse
+import os
+import random
+import string
+import subprocess
+import yaml
+
+import rospy
+
+def start():
+    ''.join(random.choice(string.ascii_uppercase + string.digits)
+            for _ in range(5))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=None, type=str,
+                        help="Pass file to select topics/services to be bridged")
+    parser.add_argument("--ros2_ws_path", default=None, type=str,
+                        help="Pass path to the ROS2 env explicitly")
+    parser.add_argument("--ros1_ws_path", default=None, type=str,
+                        help="Pass path to the ROS1 env explicitly")
+    parser.add_argument("--name", default='ros1_bridge', type=str,
+                        help="Name of the bridge node to be created.")
+    parser.add_argument("--domain_id", default=0, type=int,
+                        help="Domain ID to launch this bridge")
+    parser.add_argument("--bridge-all-1to2-topics", action='store_true',
+                        help="Bridge all topics from ROS1=>ROS2")
+    parser.add_argument("--bridge-all-2to1-topics", action='store_true',
+                        help="Bridge all topics from ROS2=>ROS1")
+    parser.add_argument("--bridge-all-topics", action='store_true',
+                        help="Bidge topics Bi-Directionally (overrules other options)")
+    args, _ = parser.parse_known_args()
+    raw_data = None
+    try:
+        with open(args.config, 'r') as f:
+            raw_data = f.read()
+    except OSError:
+        print("failed to read file %s" % args.config)
+        exit(1)
+    data = None
+    try:
+        data = yaml.load(raw_data)
+    except yaml.YAMLError as e:
+        print('Error parsing yaml: \n%s' % e.message)
+        exit(1)
+    # add queue_size if missing
+    if 'topics' not in data and 'services' not in data:
+        print("'topics' key missing, 'services' key missing, or invalid yaml. Exiting.")
+        exit(1)
+
+    try:
+        rosmaster_uri = os.environ["ROS_MASTER_URI"]
+    except KeyError:
+        print("ROS_MASTER_URI not set")
+        exit(1)
+    if args.ros2_ws_path != None:
+        ros2_ws_path = args.ros2_ws_path
+    else:
+        try:
+            ros2_ws_path = os.environ['ROS2_WS_PATH']
+            if not os.path.exists(os.path.join(ros2_ws_path, "install", "setup.bash")):
+                print("%s does not appear to be a valid ros2 workspace" %
+                      ros2_ws_path)
+                exit(1)
+        except KeyError:
+            print("Please set env var : ROS2_WS_PATH ")
+            exit(1)
+    if args.ros1_ws_path != None:
+        ros1_ws_path = args.ros1_ws_path
+    else:
+        try:
+            ros1_ws_path = os.environ['ROS1_WS_PATH']
+            if not os.path.exists(os.path.join(ros1_ws_path, "devel", "setup.bash")):
+                print("%s does not appear to be a valid ros1 workspace" %
+                      ros1_ws_path)
+                exit(1)
+        except KeyError:
+            print("Please set env var : ROS1_WS_PATH ")
+            exit(1)
+
+    randstr = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(5))  # noqa: E501
+    paramkey = '_'.join(['/ros12_bridged_', randstr])
+    # make sure it's a global key
+    progkey = '/' + paramkey if paramkey[0] != '/' else paramkey
+    topic_regex_key = progkey + '_topics'
+    service_regex_key = progkey + '_services'
+
+    if 'topics' in data:
+        rospy.set_param(progkey + '_topics', data['topics'])
+    if 'services' in data:
+        rospy.set_param(progkey + '_services', data['services'])
+
+    topics_direction = ""
+    if args.bridge_all_topics:
+        topics_direction += " --bridge-all-topics"
+    if args.bridge_all_1to2_topics:
+        topics_direction += " --bridge-all-1to2-topics"
+    if args.bridge_all_2to1_topics:
+        topics_direction += " --bridge-all-2to1-topics"
+
+    cmd_list = ["export ROS_MASTER_URI=%s" % rosmaster_uri]  # set rosmaster_uri
+    cmd_list.append("source %s/devel/setup.bash" % ros1_ws_path)  # set ROS1 WS path
+    cmd_list.append("source %s/install/setup.bash" % ros2_ws_path)  # set ROS2 WS path
+    cmd_list.append("export ROS_DOMAIN_ID=%s" % args.domain_id)  # set ROS2 domain_id
+    cmd_list.append(
+        "ros2 run ros1_bridge dynamic_whitelist_bridge {topics_direction} --node-suffix {node_suffix} --topic-regex-list {topic_regex_key} --service-regex-list {service_regex_key}")  # noqa: E501
+    cmd = " && ".join(cmd_list).format(topics_direction=topics_direction, node_suffix=args.name,
+                                       topic_regex_key=topic_regex_key, service_regex_key=service_regex_key)
+    res = subprocess.call("/bin/bash -c '%s'" % cmd, shell=True)
+    if res != 0:
+        print("Error occured while calling command. Something is wrong. ...Exiting.\nCommand Executed: %s" % cmd)
+        exit(1)
+
+if __name__ == "__main__":
+    try:
+        start()
+    except KeyboardInterrupt:
+        exit(1)

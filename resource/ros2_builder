@@ -1,0 +1,501 @@
+#! /usr/bin/env python2
+
+try:
+    import sys
+    import rosmsg
+    import rospkg
+    import os
+    import jinja2
+    import re
+    import yaml
+    import subprocess
+    import argparse
+    import logging
+    import atexit
+    import distutils.dir_util
+    import distutils.file_util
+except ImportError as e:
+    msg = e.message if sys.version_info < (3, 0) else e.msg  # noqa: E1101
+    print("Missing python depend: %s" % msg)
+    if "rosmsg" in msg or "rospkg" in msg:
+        print("You probably fogot to source your ros1 workspace\n")
+    exit(1)
+
+COMPLEX_STD_TYPES = {'Header', 'ColorRGBA', 'MultiArrayDimension', 'UInt8MultiArray',
+                     'MultiArrayLayout', 'ByteMultiArray', 'Float32MultiArray', 'Float64MultiArray',
+                     'Int16MultiArray', 'Int32MultiArray', 'Int64MultiArray', 'Int8MultiArray',
+                     'UInt16MultiArray', 'UInt32MultiArray', 'UInt64MultiArray', }
+
+VALID_PACKAGE_NAME_PATTERN = re.compile('^[a-z]([a-z0-9_]?[a-z0-9]+)*$')
+VALID_FIELD_NAME_PATTERN = re.compile('^[a-z]([a-z0-9_]?[a-z0-9]+)*$')
+# relaxed patterns used for compatibility with ROS 1 messages
+ROS1_VALID_FIELD_NAME_PATTERN = re.compile('^[A-Za-z][A-Za-z0-9_]*$')
+VALID_MESSAGE_NAME_PATTERN = re.compile('^[A-Z][A-Za-z0-9]*$')
+# relaxed patterns used for compatibility with ROS 1 messages
+ROS1_VALID_MESSAGE_NAME_PATTERN = re.compile('^[A-Za-z][A-Za-z0-9]*$')
+VALID_CONSTANT_NAME_PATTERN = re.compile('^[A-Z]([A-Z0-9_]?[A-Z0-9]+)*$')
+
+TEMP_CONVGEN_MSGS = '/tmp/convgen_msgs'
+
+cmake_template = None
+with open('templates/CMakeLists.txt.j2', 'r') as f:
+    cmake_template = jinja2.Template(f.read())
+pkg_xml_template = None
+with open('templates/package.xml.j2', 'r') as f:
+    pxml_template = jinja2.Template(f.read())
+mapping_rules_template = None
+with open('templates/mapping_rules.yaml.j2', 'r') as f:
+    maprules_template = jinja2.Template(f.read())
+ros1_finder_template = None
+with open('templates//find_ros1_interface_packages.cmake.j2', 'r') as f:
+    ros1_finder_template = jinja2.Template(f.read())
+
+
+def camel_case_to_lower_case_underscore(value):
+    # insert an underscore before any upper case letter
+    # which is not followed by another upper case letter
+    value = re.sub('(.)([A-Z][a-z]+)', '\\1_\\2', value)
+    # insert an underscore before any upper case letter
+    # which is preseded by a lower case letter or number
+    value = re.sub('([a-z0-9])([A-Z])', '\\1_\\2', value)
+    return value.lower()
+
+
+def _copy_file_contents(src, dst, buffer_size=16*1024):
+    """Copy the file 'src' to 'dst'; both must be filenames.  Any error
+    opening either file, reading from 'src', or writing to 'dst', raises
+    DistutilsFileError.  Data is read/written in chunks of 'buffer_size'
+    bytes (default 16k).  No attempt is made to handle anything apart from
+    regular files.
+    """
+    # Stolen from shutil module in the standard library, but with
+    # custom error-handling added.
+    fsrc = None
+    srcdata = None
+    fdst = None
+    try:
+        try:
+            fsrc = open(src, 'rb')
+        except OSError as e:
+            raise distutils.file_util.DistutilsFileError(
+                "could not open '%s': %s" % (src, e.strerror))
+        try:
+            srcdata = fsrc.read()
+        except OSError as e:
+            raise distutils.file_util.DistutilsFileError(
+                "could not read '%s': %s" % (src, e.strerror))
+
+        if os.path.exists(dst):
+            try:
+                fdst = open(dst, 'rb')
+                if srcdata == fdst.read():
+                    return
+            except OSError as e:
+                raise distutils.file_util.DistutilsFileError(
+                    "could not read '%s': %s" % (dst, e.strerror))
+        global NUM_CHANGED
+        NUM_CHANGED += 1  # noqa: E602
+        try:
+            if fdst:
+                fdst.close()
+            fdst = open(dst, 'wb')
+        except OSError as e:
+            raise distutils.file_util.DistutilsFileError(
+                "could not create '%s': %s" % (dst, e.strerror))
+        try:
+            fdst.write(srcdata)
+        except OSError as e:
+            raise distutils.file_util.DistutilsFileError(
+                "could not write to '%s': %s" % (dst, e.strerror))
+    finally:
+        if fdst:
+            fdst.close()
+        if fsrc:
+            fsrc.close()
+
+
+distutils.file_util._copy_file_contents = _copy_file_contents
+
+
+def get_depends(name, _manifest_manager, depends_cache):
+    """
+    Get dependencies of a resource.  If implicit is ``True``, this
+    includes implicit (recursive) dependencies.
+
+    :param name: resource name, ``str``
+    :param implicit: include implicit (recursive) dependencies, ``bool``
+
+    :returns: list of names of dependencies, ``[str]``
+    :raises: :exc:`InvalidManifest` If resource or any of its
+      dependencies have an invalid manifest.
+    """
+
+    if name in depends_cache:
+        return depends_cache[name]
+
+    # take the union of all dependencies
+    try:
+        names = [p.name for p in _manifest_manager.get_manifest(name).depends]
+    except rospkg.common.ResourceNotFound:
+        return False
+
+    # assign key before recursive call to prevent infinite case
+    depends_cache[name] = s = set()
+
+    _lower_blacklist = set()
+    for p in names:
+        inr_deps = get_depends(p, _manifest_manager, depends_cache)
+        if inr_deps != False:
+            s.update(inr_deps)
+        else:
+            _lower_blacklist.add(p)
+    # add in our own deps
+    s.update([name for name in names if name not in _lower_blacklist])
+    # cache the return value as a list
+    s = list(s)
+    depends_cache[name] = s
+    return s
+
+
+def maybe_remove_tree(path):
+    errcls = OSError if sys.version_info < (3, 0) else FileNotFoundError  # noqa: E0602
+    try:
+        distutils.dir_util.remove_tree(path)
+    except errcls as e:
+        if e.errno == 2:
+            pass
+
+
+atexit.register(lambda: maybe_remove_tree(TEMP_CONVGEN_MSGS))
+
+
+class GenRos2MsgPacks(object):
+    def __init__(self, path=None, logger=None):
+        self.packages = {}
+        self.path = path
+        self.logger = logger
+        self.rospack = rospkg.RosPack()
+
+    def list_candidate_packages(self):
+        pkgs = []
+        if self.path:
+            self.logger.warning("Using yaml file at path: '%s'." % self.path)
+            file_data = None
+            try:
+                with open(self.path, 'r') as f:
+                    file_data = f.read()
+            except IOError:
+                self.logger.error("Path %s not found. Exiting" % self.path)
+                exit(1)
+            try:
+                pkgs = yaml.load(file_data)['packages']
+            except (yaml.YAMLError, KeyError):
+                self.logger.error(
+                    "Your yaml file is probably malformed. Exiting")
+                exit(1)
+        else:
+            pkgs = self.rospack.list()
+            self.logger.warn('No yaml path provided')
+            self.logger.warn("Auto detecting")
+        self.logger.info("Generating messages for the following packages.")
+        for p in pkgs:
+            try:
+                package_path = rosmsg._get_package_paths(p, self.rospack)[0]
+                conv_check_path = os.path.join(package_path, '.genros2')
+                if self.path or os.path.exists(conv_check_path):
+                    self.packages[p] = {"path": package_path}
+            except rospkg.ResourceNotFound:
+                self.logger.error("Couldn't find package : '%s'" % p)
+                self.logger.error(
+                    "Perhaps there is a typo in your yaml or error in sourcing the workspace. \
+                    Exiting")
+                exit(1)
+
+    def resolve_depends(self):
+        for package, info in self.packages.items():
+            info["messages"] = {}
+            info["services"] = {}
+            info["depends"] = set()
+            info["rosdeps"] = set(get_depends(package, self.rospack, {}))
+            messages = rosmsg.list_types(package, '.msg', self.rospack)
+            for msg in messages:
+                text = rosmsg.get_msg_text(msg, True, self.rospack)
+                msg = msg.lstrip(package+'/')
+                info['messages'][msg] = {}
+                info['messages'][msg]['text'] = text
+                info['messages'][msg]['fmap'] = {}
+                info["depends"].update(
+                    self.normalize_and_clean(info['messages'][msg], msg))
+            services = rosmsg.list_types(package, '.srv', self.rospack)
+            for srv in services:
+                text = rosmsg.get_srv_text(srv, True, self.rospack)
+                srv = srv.lstrip(package+'/')
+                info['services'][srv] = {}
+                info['services'][srv]['fmap'] = {}
+                info['services'][srv]['text'] = text
+                info["depends"].update(
+                    self.normalize_and_clean(info['services'][srv], srv))
+
+    def normalize_and_clean(self, entity, entity_name):
+        if not (VALID_MESSAGE_NAME_PATTERN.match(entity_name)):
+            self.logger.warn(
+                "This message %s may not be valid in ROS2 it must start with a Uppercase char" % entity_name)  # noqa: E501
+            exit(1)
+        extracted_depends = set()
+        text_data = entity['text']
+        new_text = '#autogen msg, for ROS2 do not edit\n'
+        fields = text_data.split('\n')
+        for field in fields:
+            field = field.strip()  # get rid of huma put space
+            try:
+                if len(field) > 0 and field[0] == "#":
+                    raise ValueError # copy "as is" is a comment line
+                if "=" in field:
+                    raise ValueError  # this is a constant copy it as is
+                splat_fields = field.split()
+                if len(splat_fields)<2:
+                    raise ValueError # copy as is
+                msg_type = splat_fields[0]
+                key = splat_fields[1]
+                misc_trailing_text = ""  # handle trailing comments
+                if len(splat_fields)>2:
+                    misc_trailing_text = ' '.join(splat_fields[2:])
+
+                if not (VALID_FIELD_NAME_PATTERN.match(key)):
+                    self.logger.warn("\nThe field '%s' from pkg: '%s' is not valid in ROS2 consider using lower_snake_case" % (  # noqa: E501
+                        key, entity_name))
+                    self.logger.warn(
+                        "Setting up appropriate mappings but this is not guranteed to work")
+                    new_key = camel_case_to_lower_case_underscore(key)
+                    entity['fmap'][key] = new_key
+                    key = new_key
+                else:
+                    entity['fmap'][key] = key
+
+            except ValueError:
+                new_text += field + '\n'
+                continue
+            try:
+                pkg, msg_subtype = msg_type.split('/')
+                if pkg[0] != "#":
+                    extracted_depends.add(pkg)
+            except ValueError:
+                if msg_type in COMPLEX_STD_TYPES:
+                    pkg = "std_msgs"
+                    msg_subtype = msg_type
+                elif msg_type in {'Time', 'Duration', 'time', 'duration'}:
+                    pkg = "builtin_interfaces"
+                    msg_subtype = msg_type.capitalize()
+                else:
+                    pkg = ''
+                    msg_subtype = msg_type
+            if msg_subtype in {'Time', 'Duration', 'time', 'duration'}:
+                pkg = "builtin_interfaces"
+                msg_subtype = msg_subtype.capitalize()
+            msg_type = '/'.join([pkg, msg_subtype]).lstrip('/')
+
+            field = ' '.join([msg_type, key, misc_trailing_text])
+            new_text += field + '\n'
+        entity['text'] = new_text
+        return extracted_depends
+
+    def write_data(self):
+        rootpath = TEMP_CONVGEN_MSGS
+        self.logger.warn("Cleaning local workdir")
+        maybe_remove_tree(rootpath)
+        overall_depends = set()
+        for pkg in self.packages.keys():
+            self.logger.info("Matching package %s found" % pkg)
+            depends = self.packages[pkg]["depends"]
+            messages = self.packages[pkg]["messages"]
+            services = self.packages[pkg]["services"]
+            overall_depends = overall_depends.union(
+                self.packages[pkg]["rosdeps"])
+            overall_depends.add(pkg)
+
+            basepath = os.path.join(rootpath, pkg)
+
+            if len(messages):
+                logger.debug("Writing messages to msg path")
+                mbasepath = os.path.join(basepath, "msg")
+                os.makedirs(mbasepath)
+                for msg, mdata in messages.items():
+                    mpath = os.path.join(mbasepath, msg)
+                    with open(mpath+'.msg', 'w') as f:
+                        f.write(mdata["text"])
+
+            if len(services) > 0:
+                logger.debug("Writing services to srv path")
+                mbasepath = os.path.join(basepath, "srv")
+                os.makedirs(mbasepath)
+                for msg, mdata in services.items():
+                    mpath = os.path.join(mbasepath, msg)
+                    with open(mpath+'.srv', 'w') as f:
+                        f.write(mdata["text"])
+
+            logger.debug("Writing the CMakeLists.txt file")
+            with open(os.path.join(basepath, "CMakeLists.txt"), 'w') as f:
+                f.write(cmake_template.render(package_name=pkg,
+                                              depends=depends,
+                                              messages=messages.keys(),
+                                              services=services.keys()))
+            logger.debug("Writing the package.xml file")
+            with open(os.path.join(basepath, "package.xml"), 'w') as f:
+                f.write(pxml_template.render(
+                    package_name=pkg, depends=depends))
+
+            logger.debug("Writing the mapping_rules.yaml file")
+            with open(os.path.join(basepath, "mapping_rules.yaml"), 'w') as f:
+                f.write(maprules_template.render(package_name=pkg,
+                                                 messages=messages.keys(),
+                                                 services=services.keys(),
+                                                 raw_data=self.packages[pkg]))
+
+            if len(depends) > 0:
+                logger.warning(
+                    "NOTE: This package's messages depend on the following packages. \
+                    It is upto the user to ensure all dependent messages are converted")
+                for dep in depends:
+                    print(dep)
+        with open('/tmp/find_ros1_interface_packages.cmake', 'w') as f:
+            f.write(ros1_finder_template.render(rosdeps=overall_depends))
+
+    def clean_build_install_paths(self, ros2_ws_path):
+        for pkg in (self.packages.keys()):
+            maybe_remove_tree(os.path.join(ros2_ws_path, 'build', pkg))
+            maybe_remove_tree(os.path.join(ros2_ws_path, 'install', pkg))
+
+
+if __name__ == "__main__":
+    NUM_CHANGED = 0
+    # setup argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--file", help="Pass file to select packages to be converted", default=None)
+    parser.add_argument("--clean-install", action='store_true',
+                        help="Explicitly clean previous build and install dirs for all messages")
+    parser.add_argument("--clean-src", action='store_true',
+                        help="Explicitly clean src dirs for all converted messages")
+    parser.add_argument("--clean-all", action='store_true',
+                        help="Explicitly clean everything")
+    parser.add_argument("--ros2-build-verbose", action='store_true',
+                        help="Show verbose output from the ROS2 build steps")
+    parser.add_argument("--no-build", action='store_false', dest='build',
+                        help="Do not start build phase")
+    parser.add_argument("--no-clean-bridge", dest='clean_bridge', action='store_false',
+                        help="Clean previous build and install dirs for `ros1_bridge`")
+    parser.add_argument("--print-pairs", action='store_true',
+                        help="Print valid pairs on end of build")
+    parser.add_argument("-v", "--verbose", dest="verbose_count",
+                        action="count", default=0,
+                        help="increases log verbosity for each occurence.")
+    args = parser.parse_args()
+    # setup logging
+    logging.basicConfig(stream=sys.stderr, level=max(3 - args.verbose_count, 0) * 10,
+                        format='%(name)s (%(levelname)s): %(message)s')
+    logger = logging.getLogger("ros12_bridge_convgen_msgs")
+    ros2_ws_path = ros1_ws_path = None
+    try:
+        ros2_ws_path = os.environ['ROS2_WS_PATH']
+        if not os.path.exists(os.path.join(ros2_ws_path, "install", "setup.bash")):
+            logger.error(
+                "%s does not appear to be a valid ros2 workspace" % ros2_ws_path)
+            exit(1)
+    except KeyError:
+        logger.error("Please set env var : ROS2_WS_PATH ")
+        exit(1)
+    try:
+        ros1_ws_path = os.environ['ROS1_WS_PATH']
+        if not os.path.exists(os.path.join(ros1_ws_path, "devel", "setup.bash")):
+            logger.error(
+                "%s does not appear to be a valid ros1 workspace" % ros1_ws_path)
+            exit(1)
+    except KeyError:
+        logger.error("Please set env var : ROS1_WS_PATH ")
+        exit(1)
+
+    msg_pack = GenRos2MsgPacks(args.file, logger)
+    logger.info("Parsing candidates")
+    msg_pack.list_candidate_packages()
+    if len(msg_pack.packages) == 0:
+        logger.warn("No candidates found nothing to do. Exiting")
+        exit(0)
+    logger.info("Parsing messages and resolving depends")
+    msg_pack.resolve_depends()
+    logger.info("Writing output to local dir")
+    msg_pack.write_data()
+
+    # Cleanup targets
+    if args.clean_all:
+        args.clean_install = True
+        args.clean_bridge = True
+        args.clean_src = True
+
+    if args.clean_install:
+        logger.warn(
+            "Removing older install and build paths for all curent packages")
+        msg_pack.clean_build_install_paths(ros2_ws_path)
+        args.clean_bridge = True
+
+    if args.clean_bridge:
+        logger.warn(
+            "Removing older install and build paths for `ros1_bridge`")
+        maybe_remove_tree(os.path.join(ros2_ws_path, 'build', 'ros1_bridge'))
+        maybe_remove_tree(os.path.join(ros2_ws_path, 'install', 'ros1_bridge'))
+
+    if args.clean_src:
+        logger.warn(
+            "Removing older src dirs for all curent packages")
+        maybe_remove_tree(os.path.join(ros2_ws_path, 'src', 'convgen_msgs'))
+
+    if args.build:
+        logger.info("Copying into place convegen messages")
+        distutils.dir_util.copy_tree(TEMP_CONVGEN_MSGS, os.path.join(
+            ros2_ws_path, 'src', 'convgen_msgs'), preserve_mode=0, preserve_times=0)
+        cmake_ext_path = os.path.join(
+            ros2_ws_path, 'src', 'ros2', 'ros1_bridge', 'cmake', 'find_ros1_interface_packages.cmake')
+        # This optimization hack breaks in dashing, maybe we could mutate the cmake there but lets deal with that later
+        #distutils.file_util.copy_file(
+        #    '/tmp/find_ros1_interface_packages.cmake', cmake_ext_path)
+        install_type = None
+        with open(os.path.join(ros2_ws_path, 'install', '.colcon_install_layout'), 'r') as f:
+            install_type = f.read()
+
+        if NUM_CHANGED == 0 and not args.clean_all:
+            logger.warn("No changes detected. Nothing to do.")
+            exit(0)
+
+        ros2_build_verbose = "--event-handlers console_direct+" if args.ros2_build_verbose else ""
+        ros2_makeflags = os.environ.get("ROS2_MAKEFLAGS", "-j2")
+        clean_flag = "--cmake-force-configure --cmake-clean-first" if args.clean_src else ""
+        install_kind = "--merge-install" if "merge" in install_type else ""
+
+        command = 'cd {path} && colcon build --symlink-install {install_kind} {ros2_build_verbose} --cmake-args " -DCMAKE_BUILD_TYPE=Release" --packages-select {packages} {clean}'  # noqa: E501
+        cmd = command.format(path=ros2_ws_path, packages=' '.join(
+            msg_pack.packages.keys()), ros2_build_verbose=ros2_build_verbose,
+            clean=clean_flag, install_kind=install_kind)
+        logger.info("Building packages")
+        logger.info("Build command : %s" % cmd)
+        result = subprocess.call(
+            "/bin/bash -c '%s' " % cmd, shell=True, stdout=sys.stdout, stderr=sys.stderr)
+        if result != 0:
+            logger.error("Error occured in building message packages. Exiting")
+            exit(1)
+
+        cmd_list = ["cd %s" % ros2_ws_path]  # cd to dir
+        cmd_list.append("source %s/devel/setup.bash" % ros1_ws_path)  # set ROS1 WS path
+        cmd_list.append("source %s/install/setup.bash" % ros2_ws_path)  # set ROS2 WS path
+        cmd_list.append("export MAKEFLAGS=%s" % ros2_makeflags)  # makeflags
+        cmd_list.append('colcon build --symlink-install {install_kind} {ros2_build_verbose} --cmake-args " -DCMAKE_BUILD_TYPE=Release" --packages-select ros1_bridge --cmake-force-configure --cmake-clean-first')  # noqa: E501
+        cmd = " && ".join(cmd_list).format(ros2_build_verbose=ros2_build_verbose,
+                             ros2_makeflags=ros2_makeflags, install_kind=install_kind)
+        logger.info("Building bridge")
+        logger.info("Build command : %s" % cmd)
+        result = subprocess.call("/bin/bash -c '%s' " % cmd, shell=True)
+        if result != 0:
+            logger.error("Error occured in building bridge package. Exiting")
+            exit(1)
+    if args.print_pairs:
+        command = 'source {r2path}/install/setup.bash && ros2 run ros1_bridge dynamic_bridge --print-pairs'  # noqa: E501
+        cmd = command.format(r2path=ros2_ws_path)
+        subprocess.call("/bin/bash -c '%s' " % cmd, shell=True)

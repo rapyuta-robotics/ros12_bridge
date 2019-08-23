@@ -1,0 +1,14 @@
+<package format="2">
+  <name>ros12_bridge</name>
+  <version>0.0.1</version>
+  <description>ROS1 wrapper to build and run the ROS2 ros1_bridge </description>
+  <license>Commercial</license>
+  <maintainer email="dhananjay.sathe@rapyuta-robotics.com">Dhananjay Sathe</maintainer>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>smach_msgs</depend>
+
+
+  <exec_depend>sootballs_ros2_setup</exec_depend>
+</package>

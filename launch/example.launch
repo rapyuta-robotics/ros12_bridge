@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+    <!-- Launch the bridge node -->
+    <arg name="domain_id" default="$(optenv ROS_DOMAIN_ID 0)"/>
+    <node pkg="ros12_bridge" type="ros12_bridge" output="screen" name="ros12_bridge_shim" 
+    args="--config=$(find ros12_bridge)/config/example.yaml --ros2-ws-path=$(env ROS2_WS_PATH) --ros1-ws-path=$(env ROS1_WS_PATH) --domain_id=$(arg domain_id) --bridge-all-topics" respawn="true" />
+</launch>
