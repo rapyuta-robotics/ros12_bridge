@@ -16,7 +16,7 @@ bridge maintained by the OSRF to bridge topics and services between ROS2<=> ROS1
  * Supports using regular expression to whitelist topics/services (you must use [this fork](https://github.com/rapyuta-robotics/ros1_bridge) until upstream merge is accepted )
 
 
-## Usage
+# Native Usage
 
 The utiltities are modelled as a ros 1 package `ros12_bridge`
 
@@ -53,7 +53,8 @@ Set the MAKEFLAGS to be passed into ROS2 :
 
 eg: `export ROS2_MAKEFLAGS=-j2` (j2 is default, ymmv)
 
-## Package Convertor
+## Utility tooling
+### Package Convertor
 
 Generate ROS2 _ports_ for your ros1 packages:
 
@@ -102,7 +103,7 @@ if they contain the '_.genros2_' file
  * Increase levels of verbosity using :-vv
  * Use --help to see other options.
 
-## Bridge Runner
+### Runner Utilities
 
 This utility helps you run the `ros1_bridge` to bridge specific topics to ROS2 bidirectionally 
  
