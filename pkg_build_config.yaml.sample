@@ -1,5 +1,2 @@
 packages:
-  - rosmon
-  - sootballs_msgs
-  - alica_msgs
-  - agent_id
+  - mycustompackage_msgs

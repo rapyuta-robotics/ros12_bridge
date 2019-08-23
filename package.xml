@@ -6,9 +6,6 @@
   <maintainer email="dhananjay.sathe@rapyuta-robotics.com">Dhananjay Sathe</maintainer>
 
   <buildtool_depend>catkin</buildtool_depend>
-
-  <depend>smach_msgs</depend>
-
-
+  <depend>mycustompackage_msgs</depend>
   <exec_depend>sootballs_ros2_setup</exec_depend>
 </package>

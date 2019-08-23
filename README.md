@@ -40,6 +40,7 @@ eg: `catkin build ros12_bridge --cmake-args -DCMAKE_FORCE_ROS12_REBUILD=OFF`
 
 To run the bridge `roslaunch ros12_bridge example.launch`
 
+### Build and track dependencies 
 The CMakeLists.txt and package.xml can be modified to ensure your dependency trees 
 are satisfied by catkin before templating and switching into colcon to build ROS2
 

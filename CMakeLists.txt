@@ -9,7 +9,7 @@ project(ros12_bridge)
 ## add in all packages here that are required to be converted an bridged between 1 and 2 
 # think of this a meta depend list
 set(PKG_DEPS
-    smach_msgs
+    #mycustompackage_msgs
 )
 find_package(catkin REQUIRED COMPONENTS ${PKG_DEPS})
 
