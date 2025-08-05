@@ -1,0 +1,8 @@
+topics:
+  - topic: /livox_back/lidar_filtered
+    type: sensor_msgs/msg/PointCloud2
+    queue_size: 1
+  - topic: /localization_status_hdl
+    type: rr_lbc_msgs/msg/LocalizationStatus
+    queue_size: 1
+  

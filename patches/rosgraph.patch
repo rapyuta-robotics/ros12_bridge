@@ -1,0 +1,53 @@
+diff --git a/src/rosgraph/roslogging.py b/src/rosgraph/roslogging.py
+index 9ecc121893..39fcfee2be 100644
+--- a/src/rosgraph/roslogging.py
++++ b/src/rosgraph/roslogging.py
+@@ -49,47 +49,7 @@ from rospkg.environment import ROS_LOG_DIR
+ 
+ class LoggingException(Exception): pass
+ 
+-class RospyLogger(logging.getLoggerClass()):
+-    def findCaller(self, *args, **kwargs):
+-        """
+-        Find the stack frame of the caller so that we can note the source
+-        file name, line number, and function name with class name if possible.
+-        """
+-        file_name, lineno, func_name = super(RospyLogger, self).findCaller(*args, **kwargs)[:3]
+-        file_name = os.path.normcase(file_name)
+-
+-        f = inspect.currentframe()
+-        if f is not None:
+-            f = f.f_back
+-        while hasattr(f, "f_code"):
+-            # Search for the right frame using the data already found by parent class.
+-            co = f.f_code
+-            filename = os.path.normcase(co.co_filename)
+-            if filename == file_name and f.f_lineno == lineno and co.co_name == func_name:
+-                break
+-            if f.f_back:
+-                f = f.f_back
+-
+-        # Jump up two more frames, as the logger methods have been double wrapped.
+-        if f is not None and f.f_back and f.f_code and f.f_code.co_name == '_base_logger':
+-            f = f.f_back
+-            if f.f_back:
+-                f = f.f_back
+-        co = f.f_code
+-        func_name = co.co_name
+-
+-        # Now extend the function name with class name, if available.
+-        try:
+-            class_name = f.f_locals['self'].__class__.__name__
+-            func_name = '%s.%s' % (class_name, func_name)
+-        except KeyError:  # if the function is unbound, there is no self.
+-            pass
+-
+-        if sys.version_info > (3, 2):
+-            # Dummy last argument to match Python3 return type
+-            return co.co_filename, f.f_lineno, func_name, None
+-        else:
+-            return co.co_filename, f.f_lineno, func_name
++class RospyLogger(logging.getLoggerClass()): pass
+ 
+ logging.setLoggerClass(RospyLogger)
+

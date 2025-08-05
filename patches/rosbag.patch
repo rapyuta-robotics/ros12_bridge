@@ -1,0 +1,13 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 031cf953fe..4ae5cc936e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,7 +12,7 @@ find_package(BZip2 REQUIRED)
+ catkin_python_setup()
+ 
+ # Support large bags (>2GB) on 32-bit systems
+-add_definitions(-D_FILE_OFFSET_BITS=64)
++add_definitions(-D_FILE_OFFSET_BITS=64 -DBOOST_TIMER_ENABLE_DEPRECATED)
+ 
+ include_directories(include ${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS}
+   ${BZIP2_INCLUDE_DIR}
